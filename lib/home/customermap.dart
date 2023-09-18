@@ -1,0 +1,301 @@
+import 'dart:async';
+import 'dart:convert';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_map/flutter_map.dart';
+import 'package:http/http.dart' as http;
+import 'package:latlong2/latlong.dart';
+import 'package:location/location.dart';
+
+class custmermap extends StatefulWidget {
+  final double customerLatitude;
+  final double customerLongitude;
+
+  custmermap({
+    required this.customerLatitude,
+    required this.customerLongitude,
+  });
+
+  @override
+  _MapScreenState createState() => _MapScreenState();
+}
+
+class _MapScreenState extends State<custmermap> {
+  final MapController _mapController = MapController();
+  LocationData? _currentLocation;
+  List<LatLng> _routeCoordinates = [];
+  double _totalDistance = 0.0;
+  double _remainingDistance = 0.0;
+  int _estimatedDuration = 0;
+  Timer? _timer;
+
+  @override
+  void initState() {
+    super.initState();
+    _getCurrentLocation().then((_) {
+      if (_currentLocation != null) {
+        _mapController.move(
+          LatLng(_currentLocation!.latitude!, _currentLocation!.longitude!),
+          15.0,
+        );
+        _getRouteCoordinates();
+      }
+    });
+
+    // Start a timer to automatically refresh the map every 5 seconds
+    _timer = Timer.periodic(const Duration(seconds: 5), (_) {
+      _getCurrentLocation().then((_) {
+        if (_currentLocation != null) {
+          _getRouteCoordinates();
+          _updateRiderLocation();
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel(); // Cancel the timer when the widget is disposed
+    super.dispose();
+  }
+
+  Future<void> _getCurrentLocation() async {
+    Location location = Location();
+    bool serviceEnabled;
+    PermissionStatus permissionGranted;
+    LocationData locationData;
+
+    serviceEnabled = await location.serviceEnabled();
+    if (!serviceEnabled) {
+      serviceEnabled = await location.requestService();
+      if (!serviceEnabled) {
+        return;
+      }
+    }
+
+    permissionGranted = await location.hasPermission();
+    if (permissionGranted == PermissionStatus.denied) {
+      permissionGranted = await location.requestPermission();
+      if (permissionGranted != PermissionStatus.granted) {
+        return;
+      }
+    }
+
+    locationData = await location.getLocation();
+    setState(() {
+      _currentLocation = locationData;
+    });
+  }
+
+  Future<void> _getRouteCoordinates() async {
+    if (_currentLocation != null) {
+      try {
+        var apiUrl =
+            'http://router.project-osrm.org/route/v1/driving/${_currentLocation!.longitude},${_currentLocation!.latitude};${widget.customerLongitude},${widget.customerLatitude}?overview=full&geometries=geojson';
+        var response = await http.get(Uri.parse(apiUrl));
+        var jsonResponse = jsonDecode(response.body);
+
+        var routes = jsonResponse['routes'];
+        if (routes != null && routes.length > 0) {
+          var route = routes[0];
+          var geometry = route['geometry']['coordinates'];
+          var coordinates = geometry.map<LatLng>((coord) {
+            return LatLng(coord[1], coord[0]);
+          }).toList();
+
+          setState(() {
+            _routeCoordinates = coordinates;
+            _totalDistance =
+                route['distance'] / 1000.0; // convert to kilometers
+            _remainingDistance = _totalDistance;
+            _estimatedDuration = route['duration'] ~/ 60; // convert to minutes
+          });
+
+          // Fetch vendor details from API
+        }
+      } catch (e) {
+        print('Error fetching route coordinates: $e');
+      }
+    }
+  }
+
+  Future<void> _updateRiderLocation() async {
+    if (_currentLocation != null) {
+      try {
+        var riderId = 4; // Replace with the rider's ID
+        var apiUrl = 'http://dev.codesisland.com/api/riderlocation/$riderId';
+        var response = await http.post(
+          Uri.parse(apiUrl),
+          body: {
+            'latitude': _currentLocation!.latitude.toString(),
+            'longitude': _currentLocation!.longitude.toString(),
+          },
+        );
+
+        if (response.statusCode == 200) {
+          print(response.body);
+          print('Rider location updated successfully');
+        } else {
+          print('Failed to update rider location');
+        }
+      } catch (e) {
+        print('Error updating rider location: $e');
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Leaflet Map'),
+        backgroundColor: Colors.green,
+      ),
+      body: Stack(
+        children: [
+          FlutterMap(
+            mapController: _mapController,
+            options: MapOptions(
+              center: _currentLocation != null
+                  ? LatLng(
+                      _currentLocation!.latitude!, _currentLocation!.longitude!)
+                  : LatLng(30.3753, 69.3451),
+              zoom: 13.0,
+            ),
+            layers: [
+              TileLayerOptions(
+                urlTemplate:
+                    "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                subdomains: ['a', 'b', 'c'],
+              ),
+              PolylineLayerOptions(
+                polylines: [
+                  Polyline(
+                    points: _routeCoordinates,
+                    strokeWidth: 3.0,
+                    color: Colors.blue,
+                  ),
+                ],
+              ),
+              if (_currentLocation != null)
+                MarkerLayerOptions(
+                  markers: [
+                    Marker(
+                      width: 80.0,
+                      height: 80.0,
+                      point: LatLng(
+                        _currentLocation!.latitude!,
+                        _currentLocation!.longitude!,
+                      ),
+                      builder: (ctx) =>
+                          const Icon(Icons.directions_bike, color: Colors.red),
+                    ),
+                  ],
+                ),
+              MarkerLayerOptions(
+                markers: [
+                  Marker(
+                    width: 80.0,
+                    height: 80.0,
+                    point: LatLng(
+                        widget.customerLatitude, widget.customerLongitude),
+                    builder: (ctx) => GestureDetector(
+                      onTap: () {
+                        showDialog(
+                          context: context,
+                          builder: (context) => AlertDialog(
+                            title: const Text('Vendor Details'),
+                            content: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: const [
+                                Text(
+                                    'Name: Customer Name'), // Replace with the actual vendor name
+                                Text(
+                                    'Address: Customer Address'), // Replace with the actual vendor address
+                              ],
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () {
+                                  Navigator.of(context).pop();
+                                },
+                                child: const Text('Close'),
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                      child: const Icon(Icons.location_on, color: Colors.green),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          Positioned(
+            top: 16.0,
+            right: 16.0,
+            child: Container(
+              padding: const EdgeInsets.all(8.0),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(8.0),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  const Text(
+                    'Total Distance:',
+                    style:
+                        TextStyle(fontSize: 12.0, fontWeight: FontWeight.bold),
+                  ),
+                  Text(
+                    '${_totalDistance.toStringAsFixed(2)} km',
+                    style: const TextStyle(
+                        fontSize: 16.0, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8.0),
+                  const Text(
+                    'Remaining Distance:',
+                    style:
+                        TextStyle(fontSize: 12.0, fontWeight: FontWeight.bold),
+                  ),
+                  Text(
+                    '${_remainingDistance.toStringAsFixed(2)} km',
+                    style: const TextStyle(
+                        fontSize: 16.0, fontWeight: FontWeight.bold),
+                  ),
+                  const SizedBox(height: 8.0),
+                  const Text(
+                    'Estimated Duration:',
+                    style:
+                        TextStyle(fontSize: 12.0, fontWeight: FontWeight.bold),
+                  ),
+                  Text(
+                    '$_estimatedDuration min',
+                    style: const TextStyle(
+                        fontSize: 16.0, fontWeight: FontWeight.bold),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: _goToCurrentLocation,
+        backgroundColor: Colors.green, // Set the background color to green
+        child: const Icon(Icons.my_location),
+      ),
+    );
+  }
+
+  void _goToCurrentLocation() {
+    if (_currentLocation != null) {
+      _mapController.move(
+        LatLng(_currentLocation!.latitude!, _currentLocation!.longitude!),
+        15.0,
+      );
+    }
+  }
+}
